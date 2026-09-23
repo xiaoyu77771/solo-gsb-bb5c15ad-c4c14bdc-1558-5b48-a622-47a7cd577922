@@ -1,6 +1,8 @@
 """字幕断句校验台 — FastAPI 入口。"""
 from __future__ import annotations
 
+import csv
+import io
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,12 +10,18 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from . import database as db
+from . import terms as terms_mod
 from .segmenter import analyze
-from .subtitles import LANGUAGE_NAMES, parse_subtitle, write_vtt
+from .subtitles import (LANGUAGE_NAMES, Cue, format_timestamp, parse_subtitle,
+                        write_vtt)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# 术语语言：除检测语言外支持「通用」（对全部 cue 生效）
+TERM_LANGUAGES = {"all": "通用", **LANGUAGE_NAMES}
 
 
 @asynccontextmanager
@@ -108,9 +116,18 @@ async def api_analyze(
     sid = db.save_submission(name, fmt, max_chars, min_dwell, max_cps,
                              result, revised_vtt)
 
-    return _result_payload(sid, name, fmt,
-                           {"max_chars": max_chars, "min_dwell": min_dwell,
-                            "max_cps": max_cps}, result)
+    # 术语审校：术语表非空时，对修订后 cue 做跨 cue 一致性检测
+    term_entries = _term_entries()
+    term_findings = terms_mod.check_cues(result.cues, result.spans,
+                                         term_entries)
+    if term_findings:
+        db.replace_term_findings(sid, term_findings)
+
+    payload = _result_payload(sid, name, fmt,
+                              {"max_chars": max_chars, "min_dwell": min_dwell,
+                               "max_cps": max_cps}, result)
+    payload["term_findings"] = len(term_findings)
+    return payload
 
 
 @app.get("/api/submissions")
@@ -190,6 +207,245 @@ async def api_export(sid: int, language: str | None = None):
         media_type="text/vtt; charset=utf-8",
         headers={"Content-Disposition":
                  f'attachment; filename="{filename}"'},
+    )
+
+
+# --- 术语审校 ---
+
+class TermIn(BaseModel):
+    language: str = "all"
+    canonical: str
+    variants: list[str] = []
+    forbidden: list[str] = []
+    note: str = ""
+
+
+class FindingStatusIn(BaseModel):
+    ids: list[int]
+    status: str
+
+
+def _term_entries() -> list[terms_mod.TermEntry]:
+    return [terms_mod.TermEntry(
+        id=t["id"], language=t["language"], canonical=t["canonical"],
+        variants=t["variants"], forbidden=t["forbidden"], note=t["note"])
+        for t in db.list_terms()]
+
+
+def _clean_str_list(values: list[str], label: str) -> list[str]:
+    out: list[str] = []
+    for v in values:
+        v = (v or "").strip()
+        if not v:
+            continue
+        if len(v) > 100:
+            raise HTTPException(status_code=400,
+                                detail=f"{label}「{v[:20]}…」超过 100 字符上限")
+        if v not in out:
+            out.append(v)
+    if len(out) > 50:
+        raise HTTPException(status_code=400,
+                            detail=f"{label}数量过多（上限 50 条）")
+    return out
+
+
+def _validate_term(payload: TermIn) -> dict:
+    language = (payload.language or "all").strip()
+    if language not in TERM_LANGUAGES:
+        raise HTTPException(status_code=400,
+                            detail=f"未知术语语言：{language}")
+    canonical = payload.canonical.strip()
+    if not canonical:
+        raise HTTPException(status_code=400, detail="规范词不能为空")
+    if len(canonical) > 100:
+        raise HTTPException(status_code=400, detail="规范词超过 100 字符上限")
+    if not any(ch.isalnum() for ch in canonical):
+        raise HTTPException(status_code=400,
+                            detail="规范词需至少包含一个字母或文字")
+    variants = [v for v in _clean_str_list(payload.variants, "允许变体")
+                if v != canonical]
+    forbidden = _clean_str_list(payload.forbidden, "禁止替代词")
+    if canonical in forbidden:
+        raise HTTPException(status_code=400,
+                            detail="禁止替代词不能与规范词相同")
+    conflict = set(variants) & set(forbidden)
+    if conflict:
+        raise HTTPException(
+            status_code=400,
+            detail=f"「{'、'.join(sorted(conflict))}」同时出现在允许变体与"
+                   "禁止替代词中")
+    return {
+        "language": language,
+        "canonical": canonical,
+        "variants": variants,
+        "forbidden": forbidden,
+        "note": payload.note.strip()[:200],
+    }
+
+
+def _finding_dict(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "term_id": row["term_id"],
+        "language": row["language"],
+        "language_name": TERM_LANGUAGES.get(row["language"], row["language"]),
+        "canonical": row["canonical"],
+        "cue_seq": row["cue_seq"],
+        "source_cues": [s + 1 for s in json.loads(row["source_cues"] or "[]")],
+        "start_off": row["start_off"],
+        "end_off": row["end_off"],
+        "matched": row["matched"],
+        "suggestion": row["suggestion"],
+        "category": row["category"],
+        "category_label": terms_mod.CATEGORY_LABELS.get(row["category"],
+                                                        row["category"]),
+        "reason": row["reason"],
+        "context": row["context"],
+        "cue_start": row.get("cue_start"),
+        "cue_end": row.get("cue_end"),
+        "status": row["status"],
+        "status_label": terms_mod.STATUS_LABELS.get(row["status"],
+                                                    row["status"]),
+    }
+
+
+@app.get("/api/terms")
+async def api_list_terms(language: str | None = None):
+    return {"items": db.list_terms(language), "languages": TERM_LANGUAGES}
+
+
+@app.post("/api/terms", status_code=201)
+async def api_create_term(payload: TermIn):
+    data = _validate_term(payload)
+    tid = db.create_term(**data)
+    return {"id": tid}
+
+
+@app.put("/api/terms/{tid}")
+async def api_update_term(tid: int, payload: TermIn):
+    data = _validate_term(payload)
+    if not db.update_term(tid, **data):
+        raise HTTPException(status_code=404, detail="术语不存在")
+    return {"ok": True}
+
+
+@app.delete("/api/terms/{tid}")
+async def api_delete_term(tid: int):
+    if not db.delete_term(tid):
+        raise HTTPException(status_code=404, detail="术语不存在")
+    return {"ok": True}
+
+
+@app.get("/api/submissions/{sid}/term-findings")
+async def api_term_findings(sid: int):
+    if not db.submission_exists(sid):
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return {"items": [_finding_dict(r) for r in db.list_term_findings(sid)]}
+
+
+@app.post("/api/submissions/{sid}/term-check")
+async def api_term_check(sid: int):
+    """按当前术语表重新检测（会重置全部确认为「待确认」）。"""
+    record = db.get_artifact(sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    cues = [Cue(start=c["start_sec"], end=c["end_sec"], text=c["text"])
+            for c in record["cues"]]
+    spans = [json.loads(c["source_indices"]) for c in record["cues"]]
+    findings = terms_mod.check_cues(cues, spans, _term_entries())
+    db.replace_term_findings(sid, findings)
+    return {"items": [_finding_dict(r) for r in db.list_term_findings(sid)]}
+
+
+@app.post("/api/terms/findings/status")
+async def api_finding_status(payload: FindingStatusIn):
+    if payload.status not in terms_mod.STATUS_LABELS:
+        raise HTTPException(status_code=400,
+                            detail="status 须为 pending / accepted / dismissed")
+    if not payload.ids:
+        raise HTTPException(status_code=400, detail="ids 不能为空")
+    updated = db.set_finding_status(payload.ids, payload.status)
+    return {"updated": updated}
+
+
+@app.get("/api/submissions/{sid}/term-export")
+async def api_term_export(sid: int):
+    """把已接受的术语替换批量应用到修订后 cue，导出 WebVTT。"""
+    record = db.get_artifact(sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+
+    cue_rows = record["cues"]
+    cues = {c["seq"]: Cue(start=c["start_sec"], end=c["end_sec"],
+                          text=c["text"]) for c in cue_rows}
+    by_cue: dict[int, list[dict]] = {}
+    for f in db.accepted_findings(sid):
+        by_cue.setdefault(f["cue_seq"], []).append(f)
+
+    applied = 0
+    for seq, items in by_cue.items():
+        cue = cues.get(seq)
+        if cue is None:
+            continue
+        text = cue.text
+        # 同 cue 多处替换按偏移从后往前应用，保持偏移有效
+        for f in sorted(items, key=lambda x: x["start_off"], reverse=True):
+            s, e = f["start_off"], f["end_off"]
+            if text[s:e] != f["matched"]:
+                continue  # 防御：发现快照与当前文本不一致时跳过
+            text = text[:s] + f["suggestion"] + text[e:]
+            applied += 1
+        cues[seq] = Cue(start=cue.start, end=cue.end, text=text)
+
+    vtt = write_vtt([cues[c["seq"]] for c in cue_rows])
+    base = record["submission"]["filename"].rsplit(".", 1)[0]
+    filename = f"{base}.terms.vtt"
+    return Response(
+        content=vtt,
+        media_type="text/vtt; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                 "X-Term-Replacements": str(applied)},
+    )
+
+
+@app.get("/api/submissions/{sid}/term-report")
+async def api_term_report(sid: int, format: str = "csv"):
+    """导出术语审校报告（默认 CSV，?format=json 返回 JSON）。"""
+    record = db.get_artifact(sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    rows = db.list_term_findings(sid)
+    base = record["submission"]["filename"].rsplit(".", 1)[0]
+
+    if format == "json":
+        return {"items": [_finding_dict(r) for r in rows]}
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["规范词", "术语语言", "类别", "发现文本", "建议替换",
+                     "修订cue序号", "来源cue序号", "cue开始", "cue结束",
+                     "确认状态", "原因", "上下文"])
+    for r in rows:
+        writer.writerow([
+            r["canonical"],
+            TERM_LANGUAGES.get(r["language"], r["language"]),
+            terms_mod.CATEGORY_LABELS.get(r["category"], r["category"]),
+            r["matched"],
+            r["suggestion"],
+            r["cue_seq"] + 1,
+            "+".join(str(s + 1)
+                     for s in json.loads(r["source_cues"] or "[]")),
+            format_timestamp(r["cue_start"] or 0),
+            format_timestamp(r["cue_end"] or 0),
+            terms_mod.STATUS_LABELS.get(r["status"], r["status"]),
+            r["reason"],
+            r["context"].replace("\n", " / "),
+        ])
+    filename = f"{base}.term-report.csv"
+    return Response(
+        content="﻿" + buf.getvalue(),  # BOM，便于 Excel 直接打开
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

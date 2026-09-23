@@ -64,14 +64,14 @@ main {
   color: var(--muted);
   margin-bottom: 4px;
 }
-input[type="number"], select {
+input[type="number"], input[type="text"], select {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
   font-size: 14px;
 }
-input[type="number"]:focus, select:focus {
+input[type="number"]:focus, input[type="text"]:focus, select:focus {
   outline: 2px solid rgba(47, 111, 237, .25);
   border-color: var(--brand);
 }
@@ -234,3 +234,71 @@ tr.warn { background: var(--warn-bg); }
 .issues .empty { color: var(--muted); font-size: 13px; border: none; background: none; }
 
 #history-table td button { padding: 4px 10px; font-size: 12px; }
+
+/* --- 术语表管理 --- */
+.term-grid {
+  grid-template-columns: 1fr 1.2fr 1.4fr 1.4fr 1fr;
+}
+@media (max-width: 1100px) {
+  .term-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 900px) {
+  .term-grid { grid-template-columns: 1fr; }
+}
+#term-form .primary { margin-top: 4px; }
+.terms-wrap { max-height: 240px; margin-top: 14px; }
+#terms-table td button { padding: 3px 10px; font-size: 12px; }
+
+/* --- 术语审校 --- */
+.term-review {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.term-head {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.term-head h3 { margin: 0; font-size: 15px; color: var(--ink); }
+.term-ops { display: flex; gap: 8px; flex-wrap: wrap; }
+.term-ops button { padding: 6px 12px; font-size: 13px; }
+
+.term-findings li { border-left-color: var(--brand); }
+.term-findings li.accepted {
+  border-left-color: var(--ok-ink);
+  background: #f4fbf6;
+}
+.term-findings li.dismissed { opacity: .55; }
+.term-findings .ctx {
+  display: block;
+  margin: 5px 0;
+  padding: 4px 7px;
+  background: #f7f9fd;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.term-findings mark {
+  background: #ffe08a;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.term-findings .sug {
+  display: block;
+  margin: 3px 0;
+  color: var(--ok-ink);
+}
+.fnd-status {
+  float: right;
+  font-size: 12px;
+  color: var(--muted);
+}
+li.accepted .fnd-status { color: var(--ok-ink); }
+.fnd-actions { margin-top: 6px; display: flex; gap: 8px; }
+.fnd-actions button { padding: 3px 10px; font-size: 12px; }
+
+.tag.forbidden { background: #fde2e0; color: var(--error-ink); }
+.tag.case { background: #e0e9ff; color: var(--brand-dark); }
+.tag.width { background: #dcf3ef; color: #0f766e; }
+.tag.punct { background: #fff0cf; color: var(--warn-ink); }
+.tag.spelling { background: #efe2ff; color: #6b2fb3; }

@@ -1,4 +1,4 @@
-"""SQLite 持久化层：启动时初始化，保存每次校验任务及修订结果。"""
+"""SQLite 持久化层：启动时初始化，保存校验任务、修订结果与术语审校数据。"""
 from __future__ import annotations
 
 import json
@@ -51,9 +51,38 @@ CREATE TABLE IF NOT EXISTS artifacts (
     revised_vtt TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS terms (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    language    TEXT NOT NULL DEFAULT 'all',
+    canonical   TEXT NOT NULL,
+    variants    TEXT NOT NULL DEFAULT '[]',
+    forbidden   TEXT NOT NULL DEFAULT '[]',
+    note        TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS term_findings (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    submission_id INTEGER NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+    term_id       INTEGER NOT NULL DEFAULT 0,
+    language      TEXT NOT NULL DEFAULT 'all',
+    canonical     TEXT NOT NULL,
+    cue_seq       INTEGER NOT NULL,
+    source_cues   TEXT NOT NULL DEFAULT '[]',
+    start_off     INTEGER NOT NULL,
+    end_off       INTEGER NOT NULL,
+    matched       TEXT NOT NULL,
+    suggestion    TEXT NOT NULL,
+    category      TEXT NOT NULL,
+    reason        TEXT NOT NULL,
+    context       TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending'
+);
+
 CREATE INDEX IF NOT EXISTS idx_cues_submission ON cues(submission_id);
 CREATE INDEX IF NOT EXISTS idx_issues_submission ON issues(submission_id);
 CREATE INDEX IF NOT EXISTS idx_issues_language ON issues(submission_id, language);
+CREATE INDEX IF NOT EXISTS idx_term_findings_sub ON term_findings(submission_id);
 """
 
 
@@ -153,3 +182,124 @@ def get_artifact(submission_id: int) -> dict | None:
         "cues": [dict(r) for r in cues],
         "issues": [dict(r) for r in issues],
     }
+
+
+def submission_exists(submission_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM submissions WHERE id = ?", (submission_id,)
+        ).fetchone()
+    return row is not None
+
+
+# --- 术语表 ---
+
+def _term_row(row) -> dict:
+    d = dict(row)
+    d["variants"] = json.loads(d["variants"] or "[]")
+    d["forbidden"] = json.loads(d["forbidden"] or "[]")
+    return d
+
+
+def list_terms(language: str | None = None) -> list[dict]:
+    sql = "SELECT * FROM terms"
+    args: tuple = ()
+    if language:
+        sql += " WHERE language IN (?, 'all')"
+        args = (language,)
+    sql += " ORDER BY language, id"
+    with get_conn() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return [_term_row(r) for r in rows]
+
+
+def create_term(language: str, canonical: str, variants: list[str],
+                forbidden: list[str], note: str) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO terms (language, canonical, variants, forbidden, note)
+               VALUES (?, ?, ?, ?, ?)""",
+            (language, canonical, json.dumps(variants, ensure_ascii=False),
+             json.dumps(forbidden, ensure_ascii=False), note),
+        )
+        return cur.lastrowid
+
+
+def update_term(term_id: int, language: str, canonical: str,
+                variants: list[str], forbidden: list[str], note: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """UPDATE terms SET language = ?, canonical = ?, variants = ?,
+                      forbidden = ?, note = ?
+               WHERE id = ?""",
+            (language, canonical, json.dumps(variants, ensure_ascii=False),
+             json.dumps(forbidden, ensure_ascii=False), note, term_id),
+        )
+        return cur.rowcount > 0
+
+
+def delete_term(term_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM terms WHERE id = ?", (term_id,))
+        return cur.rowcount > 0
+
+
+# --- 术语审校发现 ---
+
+def replace_term_findings(submission_id: int, findings) -> None:
+    """整体重建某次任务的术语发现（重新检测会重置确认状态）。"""
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM term_findings WHERE submission_id = ?",
+            (submission_id,),
+        )
+        conn.executemany(
+            """INSERT INTO term_findings
+               (submission_id, term_id, language, canonical, cue_seq,
+                source_cues, start_off, end_off, matched, suggestion,
+                category, reason, context)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(submission_id, f.term_id, f.language, f.canonical, f.cue_seq,
+              json.dumps(f.source_cues, ensure_ascii=False), f.start_off,
+              f.end_off, f.matched, f.suggestion, f.category, f.reason,
+              f.context)
+             for f in findings],
+        )
+
+
+def list_term_findings(submission_id: int) -> list[dict]:
+    """按任务列出术语发现，并联出所在 cue 的时间码。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT f.*, c.start_sec AS cue_start, c.end_sec AS cue_end
+               FROM term_findings f
+               LEFT JOIN cues c
+                 ON c.submission_id = f.submission_id AND c.seq = f.cue_seq
+               WHERE f.submission_id = ? ORDER BY f.id""",
+            (submission_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_finding_status(ids: list[int], status: str) -> int:
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"UPDATE term_findings SET status = ? WHERE id IN ({marks})",
+            [status, *ids],
+        )
+        return cur.rowcount
+
+
+def accepted_findings(submission_id: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT cue_seq, start_off, end_off, matched, suggestion
+               FROM term_findings
+               WHERE submission_id = ? AND status = 'accepted'
+               ORDER BY cue_seq, start_off""",
+            (submission_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
