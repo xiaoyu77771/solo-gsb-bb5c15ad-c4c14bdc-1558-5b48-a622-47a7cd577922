@@ -234,3 +234,128 @@ tr.warn { background: var(--warn-bg); }
 .issues .empty { color: var(--muted); font-size: 13px; border: none; background: none; }
 
 #history-table td button { padding: 4px 10px; font-size: 12px; }
+
+/* --- 术语表 --- */
+.head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.term-grid { grid-template-columns: repeat(2, 1fr); }
+.term-form {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7f9fd;
+  padding: 14px 16px;
+  margin: 12px 0;
+}
+.btn-row { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 14px;
+}
+input[type="text"]:focus {
+  outline: 2px solid rgba(47, 111, 237, .25);
+  border-color: var(--brand);
+}
+.nowrap { white-space: nowrap; }
+button.tiny { padding: 4px 10px; font-size: 12px; }
+button.danger { color: var(--error-ink); }
+
+.chips { max-width: 280px; }
+.chip {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  margin: 1px 2px;
+  background: #eef3ff;
+  color: var(--brand-dark);
+}
+.chip.ok { background: #e7f6ec; color: var(--ok-ink); }
+.chip.bad { background: #fde2e0; color: var(--error-ink); }
+
+/* --- 术语审校 --- */
+.term-findings { list-style: none; margin: 0; padding: 0; }
+.term-item {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn-ink);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  background: #fffdfa;
+}
+.term-item.accepted { border-left-color: var(--ok-ink); background: #f7fcf9; }
+.term-item.rejected {
+  border-left-color: var(--muted);
+  opacity: .65;
+  background: #fafbfd;
+}
+.term-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.term-tag { font-size: 11px; }
+.tag.term-tag.error { background: #fde2e0; color: var(--error-ink); }
+.tag.term-tag.warn { background: #fff0cf; color: var(--warn-ink); }
+.tag.term-tag.info { background: #e7f0ff; color: var(--brand-dark); }
+.decision {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: #eef0f4;
+  color: var(--muted);
+}
+.decision.accepted { background: #e7f6ec; color: var(--ok-ink); }
+.decision.rejected { background: #eeeef2; color: var(--muted); }
+.term-context {
+  margin: 8px 0;
+  padding: 6px 10px;
+  background: #f4f6fa;
+  border-radius: 5px;
+  line-height: 1.8;
+}
+.term-context mark.surface {
+  background: #ffe2a8;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.term-forms { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.mini-chip {
+  display: inline-block;
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: #eef3ff;
+  color: var(--brand-dark);
+  margin-right: 4px;
+}
+.mini-chip.canonical { background: #e7f6ec; color: var(--ok-ink); }
+.mini-chip.variant { background: #f0ecec; color: var(--muted); }
+.term-reason { color: #444; margin-bottom: 8px; }
+.term-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.term-actions label {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.term-actions input.replacement {
+  width: 180px;
+  padding: 5px 8px;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .term-grid { grid-template-columns: 1fr; }
+}

@@ -6,12 +6,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from . import database as db
 from .segmenter import analyze
-from .subtitles import LANGUAGE_NAMES, parse_subtitle, write_vtt
+from .subtitles import (
+    LANGUAGE_NAMES, Cue, parse_subtitle, write_vtt,
+)
+from .terminology import (
+    TYPE_LABELS, TYPE_SEVERITY, apply_replacements, make_term, review_terms,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -68,6 +74,49 @@ def _result_payload(sid: int, filename: str, fmt: str, params: dict,
     }
 
 
+# --- 术语审校辅助 ---
+
+def _load_glossary() -> list:
+    return [
+        make_term(row["language"], row["canonical"],
+                  row["allowed_list"], row["forbidden_list"],
+                  row.get("note") or "", term_id=row["id"])
+        for row in db.list_glossary_terms()
+    ]
+
+
+def _term_row_payload(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "language": row["language"],
+        "canonical": row["canonical"],
+        "allowed": row["allowed_list"],
+        "forbidden": row["forbidden_list"],
+        "note": row.get("note") or "",
+        "created_at": row.get("created_at"),
+    }
+
+
+def _term_review_payload(sid: int, findings: list[dict],
+                         counts: dict | None = None) -> dict:
+    counts = counts or db.get_decision_counts(sid)
+    by_type: dict[str, int] = {}
+    for f in findings:
+        by_type[f["issue_type"]] = by_type.get(f["issue_type"], 0) + 1
+    return {
+        "submission_id": sid,
+        "findings": findings,
+        "counts": counts,
+        "type_labels": TYPE_LABELS,
+        "type_severity": TYPE_SEVERITY,
+    }
+
+
+def _original_cues_for(sid: int) -> list[Cue]:
+    return [Cue(start=r["start_sec"], end=r["end_sec"], text=r["text"])
+            for r in db.get_original_cues(sid)]
+
+
 @app.post("/api/analyze")
 async def api_analyze(
     file: UploadFile = File(...),
@@ -108,9 +157,18 @@ async def api_analyze(
     sid = db.save_submission(name, fmt, max_chars, min_dwell, max_cps,
                              result, revised_vtt)
 
-    return _result_payload(sid, name, fmt,
-                           {"max_chars": max_chars, "min_dwell": min_dwell,
-                            "max_cps": max_cps}, result)
+    # 术语审校作用于上传的原始 cue（保留原始时间轴），与断句修订互不影响
+    db.save_original_cues(sid, cues)
+    terms = _load_glossary()
+    review = review_terms(cues, terms)
+    db.save_term_findings(sid, review["findings"])
+
+    payload = _result_payload(sid, name, fmt,
+                              {"max_chars": max_chars, "min_dwell": min_dwell,
+                               "max_cps": max_cps}, result)
+    payload["term_review"] = _term_review_payload(
+        sid, db.get_term_findings(sid))
+    return payload
 
 
 @app.get("/api/submissions")
@@ -173,6 +231,8 @@ async def api_get_submission(sid: int, language: str | None = None):
             for i in issues
         ],
         "language_names": LANGUAGE_NAMES,
+        "term_review": _term_review_payload(
+            sid, db.get_term_findings(sid)),
     }
     return payload
 
@@ -191,6 +251,239 @@ async def api_export(sid: int, language: str | None = None):
         headers={"Content-Disposition":
                  f'attachment; filename="{filename}"'},
     )
+
+
+# --- 术语表管理 ---
+
+class TermIn(BaseModel):
+    language: str = "any"
+    canonical: str = Field(min_length=1)
+    allowed: list[str] | str = []
+    forbidden: list[str] | str = []
+    note: str = ""
+
+
+class TermsImport(BaseModel):
+    terms: list[TermIn]
+    replace_all: bool = False
+
+
+def _coerce_term(body: TermIn) -> dict:
+    try:
+        term = make_term(body.language, body.canonical,
+                         body.allowed, body.forbidden, body.note)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "language": term.language,
+        "canonical": term.canonical,
+        "allowed": "\n".join(term.allowed),
+        "forbidden": "\n".join(term.forbidden),
+        "note": term.note,
+    }
+
+
+@app.get("/api/glossary")
+async def api_list_terms(language: str | None = None):
+    rows = db.list_glossary_terms(language)
+    return {"items": [_term_row_payload(r) for r in rows],
+            "language_names": LANGUAGE_NAMES}
+
+
+@app.post("/api/glossary")
+async def api_create_term(body: TermIn):
+    data = _coerce_term(body)
+    tid = db.create_glossary_term(**data)
+    return _term_row_payload(db.get_glossary_term(tid))
+
+
+@app.put("/api/glossary/{tid}")
+async def api_update_term(tid: int, body: TermIn):
+    if not db.get_glossary_term(tid):
+        raise HTTPException(status_code=404, detail="术语不存在")
+    data = _coerce_term(body)
+    db.update_glossary_term(tid, **data)
+    return _term_row_payload(db.get_glossary_term(tid))
+
+
+@app.delete("/api/glossary/{tid}")
+async def api_delete_term(tid: int):
+    if not db.delete_glossary_term(tid):
+        raise HTTPException(status_code=404, detail="术语不存在")
+    return {"deleted": tid}
+
+
+@app.post("/api/glossary/import")
+async def api_import_terms(body: TermsImport):
+    items = [_coerce_term(t) for t in body.terms]
+    n = db.bulk_replace_glossary_terms(items, body.replace_all)
+    return {"imported": n,
+            "items": [_term_row_payload(r)
+                      for r in db.list_glossary_terms()]}
+
+
+@app.get("/api/glossary/export")
+async def api_export_glossary():
+    rows = db.list_glossary_terms()
+    return {"terms": [
+        {k: v for k, v in _term_row_payload(r).items()
+         if k != "created_at"}
+        for r in rows
+    ]}
+
+
+# --- 术语审校结果与决策 ---
+
+@app.get("/api/submissions/{sid}/terms")
+async def api_get_terms(sid: int, decision: str | None = None,
+                        language: str | None = None):
+    record = db.get_artifact(sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    findings = db.get_term_findings(sid, decision=decision,
+                                    language=language)
+    return _term_review_payload(sid, findings)
+
+
+class DecisionIn(BaseModel):
+    decision: str
+    replacement: str | None = None
+
+
+@app.put("/api/submissions/{sid}/terms/{fid}")
+async def api_set_decision(sid: int, fid: int, body: DecisionIn):
+    finding = db.get_term_finding(fid)
+    if finding is None or finding["submission_id"] != sid:
+        raise HTTPException(status_code=404, detail="疑似项不存在")
+    if body.decision not in ("pending", "accepted", "rejected"):
+        raise HTTPException(status_code=400, detail="decision 取值非法")
+    replacement = body.replacement
+    if body.decision == "accepted" and replacement is not None \
+            and replacement == finding["surface"]:
+        replacement = finding["canonical"]
+    db.set_finding_decision(fid, body.decision, replacement)
+    return _term_review_payload(sid, db.get_term_findings(sid))
+
+
+class BulkDecisionIn(BaseModel):
+    decision: str
+    finding_ids: list[int] | None = None
+
+
+@app.post("/api/submissions/{sid}/terms/decisions")
+async def api_bulk_decision(sid: int, body: BulkDecisionIn):
+    if db.get_artifact(sid) is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    if body.decision not in ("pending", "accepted", "rejected"):
+        raise HTTPException(status_code=400, detail="decision 取值非法")
+    n = db.bulk_set_decisions(sid, body.decision, body.finding_ids)
+    return {"updated": n, **_term_review_payload(sid, db.get_term_findings(sid))}
+
+
+@app.get("/api/submissions/{sid}/terms/export")
+async def api_export_terms_vtt(sid: int):
+    """根据已采纳决策在原始字幕上批量替换，导出修订 WebVTT。"""
+    if db.get_artifact(sid) is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    cues = _original_cues_for(sid)
+    accepted = [f for f in db.get_term_findings(sid)
+                if f["decision"] == "accepted"]
+    revised = apply_replacements(cues, [
+        {"cue_seq": f["cue_seq"], "begin_offset": f["begin_offset"],
+         "end_offset": f["end_offset"], "replacement": f["replacement"]}
+        for f in accepted
+    ])
+    notes: dict[int, list[str]] = {}
+    for f in accepted:
+        notes.setdefault(f["cue_seq"], []).append(
+            f"[术语审校] {f['surface']} → {f['replacement']}")
+    vtt = write_vtt(revised, notes=notes)
+    sub = db.get_artifact(sid)["submission"]
+    base = sub["filename"].rsplit(".", 1)[0]
+    return Response(
+        content=vtt,
+        media_type="text/vtt; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{base}.terms.vtt"'},
+    )
+
+
+@app.get("/api/submissions/{sid}/terms/report")
+async def api_term_report(sid: int):
+    """导出 Markdown 审校报告。"""
+    record = db.get_artifact(sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    sub = record["submission"]
+    findings = db.get_term_findings(sid)
+    counts = db.get_decision_counts(sid)
+    report = _build_report(sub, findings, counts,
+                           len(db.get_original_cues(sid)))
+    base = sub["filename"].rsplit(".", 1)[0]
+    return PlainTextResponse(
+        content=report,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{base}.term-report.md"'},
+    )
+
+
+def _build_report(sub: dict, findings: list[dict],
+                  counts: dict, cue_count: int) -> str:
+    lines = [
+        "# 术语审校报告",
+        "",
+        f"- 字幕文件：{sub['filename']}",
+        f"- 任务编号：{sub['id']}",
+        f"- 原始 cue 数：{cue_count}",
+        f"- 疑似项总数：{len(findings)}",
+        f"- 待确认：{counts['pending']} ｜ 已采纳：{counts['accepted']} "
+        f"｜ 已忽略：{counts['rejected']}",
+        "",
+        "## 按类型统计",
+        "",
+    ]
+    by_type: dict[str, int] = {}
+    for f in findings:
+        by_type[f["issue_type"]] = by_type.get(f["issue_type"], 0) + 1
+    if by_type:
+        for t, n in sorted(by_type.items(), key=lambda x: -x[1]):
+            lines.append(f"- {TYPE_LABELS.get(t, t)}：{n}")
+    else:
+        lines.append("- 无疑似项")
+    lines += ["", "## 疑似项明细", ""]
+
+    if not findings:
+        lines.append("无。")
+        return "\n".join(lines) + "\n"
+
+    decision_label = {"pending": "待确认", "accepted": "已采纳",
+                      "rejected": "已忽略"}
+    for i, f in enumerate(findings, 1):
+        lang = LANGUAGE_NAMES.get(f["language"], f["language"])
+        lines += [
+            f"### {i}. {f['canonical']} —— "
+            f"{TYPE_LABELS.get(f['issue_type'], f['issue_type'])}",
+            "",
+            f"- 决策：{decision_label.get(f['decision'], f['decision'])}",
+            f"- 语言：{lang}",
+            f"- 来源 cue：{f['cue_seq'] + 1}"
+            f"（{f['start']:.3f} → {f['end']:.3f}）",
+            f"- 原表面形式：`{f['surface']}`",
+            f"- 建议替换：`{f['replacement']}`",
+            f"- 上下文：…{f['context_before']}"
+            f"**{f['surface']}**{f['context_after']}…",
+            f"- 说明：{f.get('reason') or ''}",
+        ]
+        if f["cross_cue"] and f.get("forms"):
+            forms = "、".join(
+                f"`{x['surface']}`（{x['count']} 次，cue "
+                f"{', '.join(str(s + 1) for s in x['cue_seqs'])}）"
+                for x in f["forms"]
+            )
+            lines.append(f"- 跨 cue 形式：{forms}")
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
 
 
 @app.get("/api/health")

@@ -8,4 +8,8 @@
 
 3
 00:00:03,000 --> 00:00:05,000
-A calm normal cue.
+Connect to the WI-FI and open our websyte.
+
+4
+00:00:05,000 --> 00:00:07,000
+Use Wi-Fi only; the ＨＤＭＩ port is on the back.

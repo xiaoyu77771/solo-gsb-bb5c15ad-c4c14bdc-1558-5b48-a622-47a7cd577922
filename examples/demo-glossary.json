@@ -1,0 +1,25 @@
+{
+  "terms": [
+    {
+      "language": "en",
+      "canonical": "Wi-Fi",
+      "allowed": ["WiFi"],
+      "forbidden": ["WLAN", "WIFI"],
+      "note": "品牌标准写法，连字符与大小写固定"
+    },
+    {
+      "language": "any",
+      "canonical": "HDMI",
+      "allowed": [],
+      "forbidden": [],
+      "note": "必须全大写半角"
+    },
+    {
+      "language": "en",
+      "canonical": "website",
+      "allowed": ["web site"],
+      "forbidden": [],
+      "note": ""
+    }
+  ]
+}

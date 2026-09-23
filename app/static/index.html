@@ -9,10 +9,69 @@
 <body>
   <header class="topbar">
     <h1>字幕断句校验台</h1>
-    <span class="subtitle">WebVTT / SRT · 动态规划断句 · 边界重分配 · 问题最小化标注</span>
+    <span class="subtitle">WebVTT / SRT · 动态规划断句 · 边界重分配 · 术语跨 cue 一致性审校</span>
   </header>
 
   <main>
+    <section class="card" id="glossary-card">
+      <div class="result-head">
+        <h2>术语表（按语言维护：规范词 / 允许变体 / 禁止替代词）</h2>
+        <div class="head-actions">
+          <button id="term-new-btn" class="secondary">新增术语</button>
+          <button id="term-import-btn" class="secondary">导入 JSON</button>
+          <input type="file" id="term-import-file" accept=".json,application/json" hidden />
+          <a href="/api/glossary/export" download="glossary.json">
+            <button class="secondary">导出 JSON</button>
+          </a>
+        </div>
+      </div>
+      <p class="muted" id="glossary-hint">
+        允许变体与禁止替代词可用逗号、分号或换行分隔；上传字幕后会自动做跨 cue
+        术语一致性检测。语言选「任意」时该术语对所有语言字幕生效。
+      </p>
+
+      <form id="term-form" class="term-form" hidden>
+        <input type="hidden" id="term-id" />
+        <div class="form-grid term-grid">
+          <div class="field">
+            <label for="term-language">语言</label>
+            <select id="term-language"></select>
+          </div>
+          <div class="field">
+            <label for="term-canonical">规范词 *</label>
+            <input type="text" id="term-canonical" placeholder="如 Wi-Fi / 云端同步" />
+          </div>
+          <div class="field">
+            <label for="term-note">备注（可选）</label>
+            <input type="text" id="term-note" placeholder="审校报告中展示" />
+          </div>
+          <div class="field">
+            <label for="term-allowed">允许变体（逗号分隔）</label>
+            <input type="text" id="term-allowed" placeholder="如 WiFi, wifi" />
+          </div>
+          <div class="field">
+            <label for="term-forbidden">禁止替代词（逗号分隔）</label>
+            <input type="text" id="term-forbidden" placeholder="如 WLAN" />
+          </div>
+        </div>
+        <div class="form-row btn-row">
+          <button type="submit" class="primary" id="term-save-btn">保存术语</button>
+          <button type="button" class="secondary" id="term-cancel-btn">取消</button>
+          <span class="error" id="term-error" hidden></span>
+        </div>
+      </form>
+
+      <div class="table-wrap">
+        <table id="glossary-table">
+          <thead>
+            <tr><th>语言</th><th>规范词</th><th>允许变体</th><th>禁止替代词</th>
+            <th>备注</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="card" id="upload-card">
       <h2>1. 上传字幕并设定阈值</h2>
       <form id="analyze-form">
@@ -41,10 +100,51 @@
       </form>
     </section>
 
+    <section class="card" id="term-review-card" hidden>
+      <div class="result-head">
+        <h2>2. 术语审校 <span id="term-review-file" class="muted"></span></h2>
+        <div class="head-actions">
+          <button id="terms-accept-all" class="secondary">全部采纳</button>
+          <button id="terms-ignore-all" class="secondary">全部忽略</button>
+          <button id="terms-export-btn" class="secondary">导出术语修订 WebVTT</button>
+          <button id="terms-report-btn" class="primary">导出审校报告</button>
+        </div>
+      </div>
+
+      <div class="stats" id="term-stats"></div>
+
+      <div class="filters">
+        <label>按语言筛选：
+          <select id="term-lang-filter">
+            <option value="">全部语言</option>
+          </select>
+        </label>
+        <label>按类型筛选：
+          <select id="term-type-filter">
+            <option value="">全部类型</option>
+          </select>
+        </label>
+        <label>按状态筛选：
+          <select id="term-decision-filter">
+            <option value="">全部状态</option>
+            <option value="pending">待确认</option>
+            <option value="accepted">已采纳</option>
+            <option value="rejected">已忽略</option>
+          </select>
+        </label>
+        <span id="term-count-note" class="muted"></span>
+      </div>
+
+      <p class="muted">审校作用于<strong>上传的原始 cue</strong>（时间轴保持不变），
+        与下方断句修订相互独立；逐项确认后可批量生成术语修订 WebVTT。</p>
+
+      <ul id="term-findings" class="term-findings"></ul>
+    </section>
+
     <section class="card" id="result-card" hidden>
       <div class="result-head">
-        <h2>2. 校验结果 <span id="result-file" class="muted"></span></h2>
-        <button id="export-btn" class="secondary">导出修订 WebVTT</button>
+        <h2>3. 断句校验结果 <span id="result-file" class="muted"></span></h2>
+        <button id="export-btn" class="secondary">导出断句修订 WebVTT</button>
       </div>
 
       <div class="stats" id="stats"></div>
@@ -86,7 +186,8 @@
       <div class="table-wrap">
         <table id="history-table">
           <thead>
-            <tr><th>#</th><th>文件</th><th>阈值</th><th>问题</th><th>时间</th><th></th></tr>
+            <tr><th>#</th><th>文件</th><th>阈值</th><th>断句问题</th><th>术语疑似</th>
+            <th>时间</th><th></th></tr>
           </thead>
           <tbody></tbody>
         </table>
